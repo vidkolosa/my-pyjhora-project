@@ -1,0 +1,4 @@
+# ne objavljaj efemerid
+src/jhora/data/ephe/**
+jhora/data/ephe/**
+**/site-packages/jhora/data/ephe/**
