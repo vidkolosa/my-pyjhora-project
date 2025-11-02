@@ -126,6 +126,7 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
     Placidus hiše (Sripati) in dodelitev bhav planetom.
+    Podpira oba podpisa pyswisseph.house_pos: s 7 ali 6 argumenti.
     """
     # true obliquity
     ecl = swe.calc_ut(jd_ut, swe.ECL_NUT)[0]
@@ -145,14 +146,20 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
     for name, data in planets.items():
         lon = data["trop_lon"]  # house_pos pričakuje tropične koordinate
         lat = data["trop_lat"]
-        hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat, 1.0)
-        # house_pos vrne 1..12 + frakcijo; vzemi celo število v varnih mejah
+        try:
+            # novejši podpis (7 arg)
+            hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat, 1.0)
+        except TypeError:
+            # starejši podpis (6 arg)
+            hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat)
+        # house_pos vrne npr. 5.73 (hiša + frakcija)
         house_num = int(hpos)
         if house_num < 1: house_num = 1
         if house_num > 12: house_num = 12
         planets_in_houses[name] = house_num
 
     return asc, cusps, planets_in_houses
+
 
 # ---------- API ----------
 app = FastAPI(title="My PyJHora API", version="0.3.0")
