@@ -18,5 +18,4 @@ setuptools==75.6.0
 fastapi
 uvicorn
 pydantic
-requests
 timezonefinder==6.5.8
