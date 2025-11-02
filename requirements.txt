@@ -16,3 +16,6 @@ pytz==2024.1
 Requests==2.32.3
 setuptools==75.6.0
 timezonefinder==6.5.8
+fastapi
+uvicorn
+pydantic
