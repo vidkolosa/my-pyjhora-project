@@ -3,6 +3,12 @@ from typing import Optional, Dict, Tuple
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+# dodatno za /chart_place
+from timezonefinder import TimezoneFinder
+from datetime import datetime
+import zoneinfo
+import requests
+
 # --- import iz src/ ---
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(ROOT, ".."))
@@ -119,16 +125,11 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
-    Izračuna Placidus hiše in hišno številko za vsak planet.
-    Uporabimo Swiss Ephemeris:
-      - armc iz lokalnega sideričnega časa
-      - eps (true obliquity)
-      - swe.houses_armc in swe.house_pos
-    Opomba: dodelitev bhave je invariantna na ayanamšo, zato računamo v tropičnem okviru.
+    Placidus hiše (Sripati) in dodelitev bhav planetom.
     """
-    # obliquity (true)
+    # true obliquity
     ecl = swe.calc_ut(jd_ut, swe.ECL_NUT)[0]
-    eps_true = ecl[1]  # true obliquity
+    eps_true = ecl[1]
 
     # ARMC iz lokalnega sideričnega časa
     gst_hours = swe.sidtime(jd_ut)
@@ -137,8 +138,6 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
 
     # Placidus hiše
     cusps, ascmc = swe.houses_armc(armc, geolat, eps_true, HOUSE_SYSTEM)
-
-    # Asc iz ascmc[0]
     asc = ascmc[0]
 
     # dodeli hišo za vsak planet (1..12)
@@ -146,12 +145,11 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
     for name, data in planets.items():
         lon = data["trop_lon"]  # house_pos pričakuje tropične koordinate
         lat = data["trop_lat"]
-        # dist lahko 1.0; ni pomemben za hišno pozicijo
         hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat, 1.0)
-        # house_pos vrne npr. 5.73 (hiša + frakcija); nas zanima integer 1..12
-        house_num = int(math.floor(hpos)) + 1
-        if house_num > 12:
-            house_num = 12
+        # house_pos vrne 1..12 + frakcijo; vzemi celo število v varnih mejah
+        house_num = int(hpos)
+        if house_num < 1: house_num = 1
+        if house_num > 12: house_num = 12
         planets_in_houses[name] = house_num
 
     return asc, cusps, planets_in_houses
@@ -180,10 +178,9 @@ def chart(data: BirthData):
 
         # planeti
         planets, ayan = planet_data(jd)
-        # za karake potrebujemo samo sideralne long.
         sid_only = {k: v["sid_lon"] for k,v in planets.items()}
 
-        # hiše (vedno Placidus kot v JHora)
+        # hiše (vedno Placidus, kot v JHora)
         asc, cusps, planets_in_houses = placidus_houses_and_positions(
             jd, data.lat, data.lon, planets
         )
@@ -191,7 +188,7 @@ def chart(data: BirthData):
         # čara karake
         karakas = compute_chara_karakas(sid_only)
 
-        # lep izpis planetov (trop + sid)
+        # lep izpis planetov (trop + sid + hiša)
         planets_out = {}
         for name, v in planets.items():
             planets_out[name] = {
@@ -200,7 +197,7 @@ def chart(data: BirthData):
                 "house": planets_in_houses[name]
             }
 
-        # cusps v tropičnih stopinjah; za prikaz lahko dodamo tudi sidereal
+        # cusps
         cusps_sid = [round(norm360(c - ayan), 6) for c in cusps]
 
         return {
@@ -219,3 +216,54 @@ def chart(data: BirthData):
         }
     except Exception as e:
         raise HTTPException(400, f"Calculation error: {e}")
+
+# ====== Novi endpoint: /chart_place (kraj + lokalni čas) ======
+
+tf = TimezoneFinder()
+
+class PlaceData(BaseModel):
+    place: str = Field(..., description="City and country (e.g., 'Maribor, Slovenia')")
+    datetime_local: str = Field(..., description="Local datetime 'YYYY-MM-DD HH:MM'")
+
+def geocode_place(place: str) -> Tuple[float, float]:
+    """Geolokacija preko OpenStreetMap Nominatim."""
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": place, "format": "json", "limit": 1}
+    r = requests.get(url, params=params, headers={"User-Agent":"MyJHoraAPI/1.0"})
+    if not r.ok or not r.json():
+        raise HTTPException(400, f"Cannot geocode location: {place}")
+    d = r.json()[0]
+    return float(d["lat"]), float(d["lon"])
+
+@app.post("/chart_place")
+def chart_place(data: PlaceData):
+    """Izračun karte po lokalnem času in kraju, identično JHora (Lahiri, mean node, Placidus)."""
+    try:
+        lat, lon = geocode_place(data.place)
+        tz_name = tf.timezone_at(lat=lat, lng=lon)
+        if tz_name is None:
+            raise HTTPException(400, f"Cannot find timezone for {data.place}")
+
+        # lokalni čas -> aware datetime
+        dt_local_naive = datetime.strptime(data.datetime_local, "%Y-%m-%d %H:%M")
+        tzinfo = zoneinfo.ZoneInfo(tz_name)
+        dt_local = dt_local_naive.replace(tzinfo=tzinfo)
+
+        # offset v urah (pozitivno za CET=+1, CEST=+2, itd.)
+        offset_hours = dt_local.utcoffset().total_seconds() / 3600.0
+
+        birth = BirthData(
+            name=data.place,
+            year=dt_local.year,
+            month=dt_local.month,
+            day=dt_local.day,
+            hour=dt_local.hour,
+            minute=dt_local.minute,
+            lat=lat,
+            lon=lon,
+            tz=offset_hours
+        )
+        return chart(birth)
+
+    except Exception as e:
+        raise HTTPException(400, f"chart_place error: {e}")
