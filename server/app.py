@@ -3,7 +3,7 @@ from typing import Optional, Dict, Tuple
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-# --- omogoči import "jhora" iz mape src/ ---
+# --- import iz src/ ---
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(ROOT, ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
@@ -11,8 +11,8 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 try:
-    import jhora  # tvoja koda v src/
-    import swisseph as swe  # pyswisseph
+    import jhora
+    import swisseph as swe
 except Exception as e:
     raise RuntimeError(f"Cannot import jhora: {e}")
 
@@ -20,9 +20,12 @@ EPHE_PATH = os.path.join(SRC, "jhora", "data", "ephe")
 os.makedirs(EPHE_PATH, exist_ok=True)
 swe.set_ephe_path(EPHE_PATH)
 
-app = FastAPI(title="My PyJHora API", version="0.2.0")
+# Fiksno delovanje kot JHora 8.0
+AYANAMSHA_MODE = swe.SIDM_LAHIRI     # Lahiri
+NODE_CODE      = swe.MEAN_NODE       # mean node
+HOUSE_SYSTEM   = b'P'                # Sripati/Placidus
 
-# ---------- Pomožne funkcije ----------
+# ---------- util ----------
 SIGNS = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo",
          "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
 
@@ -33,27 +36,25 @@ def sign_of(lon: float) -> str:
     return SIGNS[int(lon // 30) % 12]
 
 def deg_in_sign(lon: float) -> float:
-    """0..30 notranja stopinja v znamenju (za čara karake)."""
-    return (lon % 30.0)
+    return lon % 30.0
 
 def lahiri_ayanamsa_ut(jd_ut: float) -> float:
-    """Lahiri ayanamsha v stopinjah (UT)."""
-    try:
-        return float(swe.get_ayanamsa_ut(jd_ut))
-    except Exception:
-        # stare verzije pyswisseph:
-        return float(swe.get_ayanamsa(jd_ut))
+    swe.set_sid_mode(AYANAMSHA_MODE, 0, 0)
+    return float(swe.get_ayanamsa_ut(jd_ut))
 
 def to_sidereal(lon_tropical: float, ayan: float) -> float:
     return norm360(lon_tropical - ayan)
 
-def planet_longitudes(jd_ut: float) -> Dict[str, Tuple[float,float]]:
+def julday_ut(y,m,d,h,mi,tz) -> float:
+    ut = h + mi/60.0 - tz
+    return swe.julday(y, m, d, ut)
+
+def planet_data(jd_ut: float):
     """
-    Vrne {ime: (tropical_lon, sidereal_lon)} za 9 grah.
-    Uporablja Lahiri ayanamsha in MEAN node (JHora privzeto).
+    Vrne dict:
+      name -> {trop_lon, trop_lat, sid_lon}
     """
     ayan = lahiri_ayanamsa_ut(jd_ut)
-
     bodies = {
         "Sun":     swe.SUN,
         "Moon":    swe.MOON,
@@ -62,52 +63,48 @@ def planet_longitudes(jd_ut: float) -> Dict[str, Tuple[float,float]]:
         "Jupiter": swe.JUPITER,
         "Venus":   swe.VENUS,
         "Saturn":  swe.SATURN,
-        "Rahu":    swe.MEAN_NODE,
-        "Ketu":    swe.MEAN_NODE,  # Ketu = Rahu + 180
+        "Rahu":    NODE_CODE,
+        "Ketu":    NODE_CODE,  # iz Rahuja +180
     }
 
-    res = {}
+    out = {}
+    rahu_lon = None
+    rahu_lat = 0.0
     for name, code in bodies.items():
         if name == "Ketu":
-            # izračunaj iz Rahuja
-            rahu_trop = res["Rahu"][0]
-            ketu_trop = norm360(rahu_trop + 180.0)
-            ketu_sid = to_sidereal(ketu_trop, ayan)
-            res["Ketu"] = (ketu_trop, ketu_sid)
+            # izračun iz Rahuja
+            trop_lon = norm360(rahu_lon + 180.0)
+            sid_lon  = to_sidereal(trop_lon, ayan)
+            out["Ketu"] = {"trop_lon": trop_lon, "trop_lat": rahu_lat, "sid_lon": sid_lon}
             continue
 
-        lon_trop = swe.calc_ut(jd_ut, code)[0][0]
-        lon_sid  = to_sidereal(lon_trop, ayan)
-        res[name] = (norm360(lon_trop), norm360(lon_sid))
+        xx, _ = swe.calc_ut(jd_ut, code)
+        lon_trop, lat_trop = xx[0], xx[1]
+        if name == "Rahu":
+            rahu_lon, rahu_lat = lon_trop, lat_trop
+        out[name] = {
+            "trop_lon": norm360(lon_trop),
+            "trop_lat": lat_trop,
+            "sid_lon":  to_sidereal(lon_trop, ayan),
+        }
+    return out, ayan
 
-    return res
-
-def compute_chara_karakas(sidereal: Dict[str, float]) -> Dict[str, Dict]:
-    """
-    7-karaka shema: AK, AmK, BK, MK, PK, GK, DK
-    Pravila:
-      - Ketu je IZKLJUČEN
-      - Rahu dobi "karaka degree" = 30° - (lon % 30°) (retro pravilo)
-      - razvrščanje po degree-in-sign (največji = Atmakaraka)
-    """
-    # pripravi seznam (planet, degree_for_ranking, sidereal_lon)
+def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict]:
+    # 7-karaka shema; Ketu izključen; Rahu: 30° - degree_in_sign
     ranking = []
-    for name, lon in sidereal.items():
+    for name, lon in sid_lon_by_planet.items():
         if name == "Ketu":
-            continue  # nikoli ni karaka
+            continue
         d = deg_in_sign(lon)
         if name == "Rahu":
             d = 30.0 - d
             if abs(d - 30.0) < 1e-8:
                 d = 0.0
         ranking.append((name, d, lon))
-
-    # sort po d (desc), nato po lon (stabilno)
     ranking.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
-    order = ["Atmakaraka","Amatyakaraka","Bhratrukaraka","Matrukaraka",
-             "Putrakaraka","Gnyatikaraka","Darakaraka"]
-
+    order = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
+             "Matrukaraka","Putrakaraka","Gnyatikaraka","Darakaraka"]
     karakas = {}
     for i, role in enumerate(order):
         if i < len(ranking):
@@ -115,13 +112,53 @@ def compute_chara_karakas(sidereal: Dict[str, float]) -> Dict[str, Dict]:
             karakas[role] = {
                 "planet": name,
                 "degree_in_sign": round(d, 4),
-                "sidereal_longitude": round(lon, 4),
+                "sidereal_longitude": round(lon, 6),
                 "sign": sign_of(lon),
             }
     return karakas
 
+def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
+    """
+    Izračuna Placidus hiše in hišno številko za vsak planet.
+    Uporabimo Swiss Ephemeris:
+      - armc iz lokalnega sideričnega časa
+      - eps (true obliquity)
+      - swe.houses_armc in swe.house_pos
+    Opomba: dodelitev bhave je invariantna na ayanamšo, zato računamo v tropičnem okviru.
+    """
+    # obliquity (true)
+    ecl = swe.calc_ut(jd_ut, swe.ECL_NUT)[0]
+    eps_true = ecl[1]  # true obliquity
 
-# ---------- API modeli ----------
+    # ARMC iz lokalnega sideričnega časa
+    gst_hours = swe.sidtime(jd_ut)
+    lst_hours = gst_hours + geolon / 15.0
+    armc = (lst_hours % 24.0) * 15.0
+
+    # Placidus hiše
+    cusps, ascmc = swe.houses_armc(armc, geolat, eps_true, HOUSE_SYSTEM)
+
+    # Asc iz ascmc[0]
+    asc = ascmc[0]
+
+    # dodeli hišo za vsak planet (1..12)
+    planets_in_houses = {}
+    for name, data in planets.items():
+        lon = data["trop_lon"]  # house_pos pričakuje tropične koordinate
+        lat = data["trop_lat"]
+        # dist lahko 1.0; ni pomemben za hišno pozicijo
+        hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat, 1.0)
+        # house_pos vrne npr. 5.73 (hiša + frakcija); nas zanima integer 1..12
+        house_num = int(math.floor(hpos)) + 1
+        if house_num > 12:
+            house_num = 12
+        planets_in_houses[name] = house_num
+
+    return asc, cusps, planets_in_houses
+
+# ---------- API ----------
+app = FastAPI(title="My PyJHora API", version="0.3.0")
+
 class BirthData(BaseModel):
     name: Optional[str] = None
     year: int; month: int; day: int
@@ -130,57 +167,55 @@ class BirthData(BaseModel):
     lon: float = Field(..., description="decimal degrees, E+ W-")
     tz:  float = Field(..., description="timezone hours (CET=+1, CEST=+2)")
 
-def julday_ut(y,m,d,h,mi,tz) -> float:
-    ut = h + mi/60.0 - tz
-    return swe.julday(y, m, d, ut)
-
 @app.get("/health")
 def health():
     ok = os.path.isdir(EPHE_PATH) and len(os.listdir(EPHE_PATH)) > 0
-    return {"status":"ok", "ephe_path": EPHE_PATH, "ephe_loaded": ok}
+    return {"status":"ok", "ephe_path": EPHE_PATH, "ephe_loaded": ok,
+            "house_system": "Sripati/Placidus", "ayanamsa": "Lahiri", "node": "Mean"}
 
 @app.post("/chart")
 def chart(data: BirthData):
-    """
-    Vrne:
-      - tropical & sidereal (Lahiri) longitudes za 9 grah
-      - znamenja
-      - ascendent
-      - čara karake (7-karaka shema)
-    """
     try:
         jd = julday_ut(data.year, data.month, data.day, data.hour, data.minute, data.tz)
 
         # planeti
-        longs = planet_longitudes(jd)  # {name: (trop, sid)}
-        planets = {}
-        sid_only = {}
-        for name, (trop, sid) in longs.items():
-            planets[name] = {
-                "tropical": {"longitude": round(trop, 6), "sign": sign_of(trop)},
-                "sidereal": {"longitude": round(sid, 6),  "sign": sign_of(sid)},
-            }
-            sid_only[name] = sid
+        planets, ayan = planet_data(jd)
+        # za karake potrebujemo samo sideralne long.
+        sid_only = {k: v["sid_lon"] for k,v in planets.items()}
 
-        # Asc (Placidus; Asc je vedno isti ne glede na hišni sistem)
-        houses, ascmc = swe.houses_ex(jd, data.lat, data.lon, b'P')
-        asc = ascmc[0]
+        # hiše (vedno Placidus kot v JHora)
+        asc, cusps, planets_in_houses = placidus_houses_and_positions(
+            jd, data.lat, data.lon, planets
+        )
 
-        # čara karake (na osnovi SIDEREAL longitudes)
+        # čara karake
         karakas = compute_chara_karakas(sid_only)
+
+        # lep izpis planetov (trop + sid)
+        planets_out = {}
+        for name, v in planets.items():
+            planets_out[name] = {
+                "tropical": {"longitude": round(v["trop_lon"], 6), "sign": sign_of(v["trop_lon"])},
+                "sidereal": {"longitude": round(v["sid_lon"], 6),  "sign": sign_of(v["sid_lon"])},
+                "house": planets_in_houses[name]
+            }
+
+        # cusps v tropičnih stopinjah; za prikaz lahko dodamo tudi sidereal
+        cusps_sid = [round(norm360(c - ayan), 6) for c in cusps]
 
         return {
             "name": data.name,
             "julian_day_ut": jd,
-            "ayanamsa": round(lahiri_ayanamsa_ut(jd), 6),
-            "ascendant": {"degree": round(asc, 6), "sign": sign_of(asc)},
-            "planets": planets,
-            "chara_karakas": karakas,
-            "notes": {
-                "ayanamsa": "Lahiri",
-                "node": "Mean node",
-                "chara_karaka_scheme": "7-karaka (AK, AmK, BK, MK, PK, GK, DK); Rahu uses (30° - degree_in_sign), Ketu excluded."
-            }
+            "ayanamsa": round(ayan, 6),
+            "settings": {"ayanamsa": "Lahiri", "node":"Mean", "house_system":"Sripati/Placidus"},
+            "ascendant": {"degree_tropical": round(asc, 6), "sign_tropical": sign_of(asc),
+                          "degree_sidereal": round(norm360(asc - ayan), 6), "sign_sidereal": sign_of(norm360(asc - ayan))},
+            "house_cusps": {
+                "tropical": [round(c, 6) for c in cusps],
+                "sidereal": cusps_sid
+            },
+            "planets": planets_out,
+            "chara_karakas": karakas
         }
     except Exception as e:
         raise HTTPException(400, f"Calculation error: {e}")
