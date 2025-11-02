@@ -11,10 +11,11 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 try:
-    import jhora
-    from jhora.swisseph import swe
+    import jhora  # paket v src/
+    import swisseph as swe  # pyswisseph - pravilni modul
 except Exception as e:
     raise RuntimeError(f"Cannot import jhora: {e}")
+
 
 # EPHE pot (napolni jo install_ephe.sh na Renderju)
 EPHE_PATH = os.path.join(SRC, "jhora", "data", "ephe")
