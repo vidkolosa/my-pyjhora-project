@@ -126,9 +126,10 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
     Placidus hiše (Sripati) in dodelitev bhav planetom.
-    Podpira oba podpisa pyswisseph.house_pos: s 7 ali 6 argumenti.
+    Podpira vse tri možne podpise funkcije house_pos:
+    (5), (6) ali (7) argumentov.
     """
-    # true obliquity
+    # True obliquity
     ecl = swe.calc_ut(jd_ut, swe.ECL_NUT)[0]
     eps_true = ecl[1]
 
@@ -141,21 +142,22 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
     cusps, ascmc = swe.houses_armc(armc, geolat, eps_true, HOUSE_SYSTEM)
     asc = ascmc[0]
 
-    # dodeli hišo za vsak planet (1..12)
     planets_in_houses = {}
     for name, data in planets.items():
-        lon = data["trop_lon"]  # house_pos pričakuje tropične koordinate
+        lon = data["trop_lon"]
         lat = data["trop_lat"]
         try:
-            # novejši podpis (7 arg)
+            # najnovejša verzija (7 arg)
             hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat, 1.0)
         except TypeError:
-            # starejši podpis (6 arg)
-            hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat)
-        # house_pos vrne npr. 5.73 (hiša + frakcija)
-        house_num = int(hpos)
-        if house_num < 1: house_num = 1
-        if house_num > 12: house_num = 12
+            try:
+                # srednja verzija (6 arg)
+                hpos = swe.house_pos(armc, geolat, eps_true, HOUSE_SYSTEM, lon, lat)
+            except TypeError:
+                # najstarejša verzija (5 arg)
+                hpos = swe.house_pos(armc, geolat, eps_true, lon, lat)
+        # varnostne meje
+        house_num = int(hpos) if 1 <= int(hpos) <= 12 else ((int(hpos) - 1) % 12 + 1)
         planets_in_houses[name] = house_num
 
     return asc, cusps, planets_in_houses
