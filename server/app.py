@@ -120,78 +120,51 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
 
 def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict]:
     """
-    JHora 8.0 Chara Karaka algorithm (Parashara system).
-    - Uses 7-karaka (Sun..Saturn); adds Rahu if tie occurs (8-karaka).
-    - Rahu's degree-in-sign = 30° - (lon % 30°)
-    - Sorted descending by degree-in-sign (highest degree = AK)
-    - If tie -> include Rahu as DK
+    JHora-style *forced 8-karaka*:
+      - rangiramo 7 grah (Sun..Saturn) po degree-in-sign (desc), tie-break po lon (desc)
+      - razdelimo vloge: AK, AmK, BK, MK, PiK, PK, GK
+      - Darakaraka = vedno Rahu (mean node)
+      - Ketu je vedno izključen
+    To se ujema z izpisom, kot ga imaš v JHora (Sun=PiK, PK=Jupiter, GK=Mercury, DK=Rahu).
     """
-    # Grahas (Sun..Saturn)
-    main_grahas = ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]
-    entries = []
-    for name in main_grahas:
+    seven = []
+    for name in ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]:
         lon = sid_lon_by_planet[name]
-        deg_in_sign = lon % 30.0
-        entries.append({
-            "planet": name,
-            "deg_in_sign": deg_in_sign,
-            "sid_lon": lon
-        })
+        d = lon % 30.0
+        seven.append({"planet": name, "deg_in_sign": d, "sid_lon": lon})
 
-    # Sort descending by degree-in-sign
-    entries.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
+    # višja stopnja v znamenju -> višji karaka; ob enakosti večja sid. dolžina
+    seven.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
 
-    # Check for tie
-    TOL = (1.0 / 3600.0)  # 1 arcsecond
-    has_tie = any(abs(entries[i]["deg_in_sign"] - entries[i+1]["deg_in_sign"]) <= TOL
-                  for i in range(len(entries)-1))
+    roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
+             "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"]
 
-    out = {}
-
-    if has_tie:
-        # 8-karaka (include Rahu as DK)
-        roles = [
-            "Atmakaraka", "Amatyakaraka", "Bhratrukaraka", "Matrukaraka",
-            "Putrakaraka", "Gnyatikaraka", "Pitrukaraka"
-        ]
-        for i, role in enumerate(roles):
-            r = entries[i]
-            out[role] = {
-                "planet": r["planet"],
-                "degree_in_sign": round(r["deg_in_sign"], 6),
-                "sidereal_longitude": round(r["sid_lon"], 6),
-                "sign": sign_of(r["sid_lon"])
-            }
-        # DK = Rahu (reverse degree-in-sign)
-        rahu_lon = sid_lon_by_planet["Rahu"]
-        rahu_d = 30.0 - (rahu_lon % 30.0)
-        if abs(rahu_d - 30.0) < 1e-12:
-            rahu_d = 0.0
-        out["Darakaraka"] = {
-            "planet": "Rahu",
-            "degree_in_sign": round(rahu_d, 6),
-            "sidereal_longitude": round(rahu_lon, 6),
-            "sign": sign_of(rahu_lon)
+    out: Dict[str, Dict] = {}
+    for i, role in enumerate(roles):
+        r = seven[i]
+        out[role] = {
+            "planet": r["planet"],
+            "degree_in_sign": round(r["deg_in_sign"], 6),
+            "sidereal_longitude": round(r["sid_lon"], 6),
+            "sign": sign_of(r["sid_lon"]),
         }
-        scheme = "8-karaka (DK=Rahu)"
-    else:
-        # Standard 7-karaka
-        roles = [
-            "Atmakaraka", "Amatyakaraka", "Bhratrukaraka",
-            "Matrukaraka", "Putrakaraka", "Gnyatikaraka", "Darakaraka"
-        ]
-        for i, role in enumerate(roles):
-            r = entries[i]
-            out[role] = {
-                "planet": r["planet"],
-                "degree_in_sign": round(r["deg_in_sign"], 6),
-                "sidereal_longitude": round(r["sid_lon"], 6),
-                "sign": sign_of(r["sid_lon"])
-            }
-        scheme = "7-karaka"
 
-    out["_meta"] = {"scheme": scheme, "tie_tolerance_deg": TOL}
+    # DK = Rahu
+    rahu_lon = sid_lon_by_planet["Rahu"]
+    rahu_d = 30.0 - (rahu_lon % 30.0)
+    if abs(rahu_d - 30.0) < 1e-12:
+        rahu_d = 0.0
+    out["Darakaraka"] = {
+        "planet": "Rahu",
+        "degree_in_sign": round(rahu_d, 6),
+        "sidereal_longitude": round(rahu_lon, 6),
+        "sign": sign_of(rahu_lon),
+    }
+
+    out["_meta"] = {"scheme": "8-karaka (forced JHora setting)"}
     return out
+
+
 
 
 
