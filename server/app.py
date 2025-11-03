@@ -123,51 +123,46 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
             }
     return karakas
 
-def _angular_diff(a, b):
-    """Shortest forward angular distance from a -> b in degrees [0,360)."""
-    d = (b - a) % 360.0
-    return d
-
-def _build_cusp_sequence(cusps):
-    """Vrni cuspe kot naraščajočo krožno zaporedje (1..12) od c1 naprej."""
-    seq = [(i+1, cusps[i]) for i in range(12)]
-    # normaliziraj na [0,360)
-    seq = [(h, norm360(lon)) for h, lon in seq]
-    return seq
-
-def _house_of_longitude(cusps, lon):
-    """
-    Določi hišo po Placidus cuspah: lon spada v interval [c_h, c_{h+1}).
-    Uporabljamo tropične dolžine (cusps so tropični).
-    """
-    lon = norm360(lon)
-    seq = _build_cusp_sequence(cusps)  # [(house, cusp_lon), ...]
-    for idx in range(12):
-        h, c = seq[idx]
-        h_next, c_next = seq[(idx + 1) % 12]
-        arc = _angular_diff(c, c_next)
-        arc_to_point = _angular_diff(c, lon)
-        if arc_to_point < arc or math.isclose(arc_to_point, arc, rel_tol=1e-12, abs_tol=1e-7):
-            return h
-    return 12  # varnostno
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
     Placidus (Sripati) hiše in dodelitev planetov po cusp intervalih.
-    Brez klica swe.house_pos → stabilno na vseh verzijah pyswisseph.
+    Absolutno stabilna verzija, združljiva z vsemi pyswisseph buildi.
     """
-    # Placidus cusps in ascmc iz JD/lat/lon (tropični)
-    cusps, ascmc = swe.houses(jd_ut, geolat, geolon, HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM)
+    # --- varna pridobitev cusps & ASC ---
+    try:
+        # 'P' mora biti byte-string za nekatere verzije, drugje str
+        hs_code = HOUSE_SYSTEM if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM.encode()
+        cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs_code)
+    except Exception:
+        # fallback, če ne sprejme bytes
+        hs_code = HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM
+        cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs_code)
+
     cusps = [norm360(c) for c in cusps[:12]]
     asc = norm360(ascmc[0])
 
+    # --- dodelitev planetov hišam glede na interval med cuspami ---
+    def house_of(lon):
+        lon = norm360(lon)
+        for i in range(12):
+            start = cusps[i]
+            end = cusps[(i + 1) % 12]
+            arc = (end - start) % 360
+            arc_p = (lon - start) % 360
+            if arc_p <= arc:
+                return i + 1
+        return 12
+
     planets_in_houses = {}
     for name, data in planets.items():
-        lon_trop = data["trop_lon"]  # hiše so tropične
-        h = _house_of_longitude(cusps, lon_trop)
+        lon_trop = data["trop_lon"]
+        h = house_of(lon_trop)
         planets_in_houses[name] = h
 
     return asc, cusps, planets_in_houses
+
+
 
 
 
