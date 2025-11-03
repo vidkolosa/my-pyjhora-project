@@ -313,3 +313,35 @@ def chart_place(data: PlaceData):
         return chart(birth)
     except Exception as e:
         raise HTTPException(400, f"chart_place error: {e}")
+
+# --- Lite različice za GPT (majhen JSON) ---
+
+@app.post("/chart_light")
+def chart_light(data: BirthData):
+    full = chart(data)
+    return {
+        "ascendant": full["ascendant"],
+        "chara_karakas": full["chara_karakas"]
+    }
+
+class PlaceDataLight(PlaceData):
+    pass
+
+@app.post("/chart_place_light")
+def chart_place_light(data: PlaceDataLight):
+    # ista logika kot /chart_place, samo vrnemo light
+    lat, lon = geocode_place(data.place)
+    tz_name = _tf.timezone_at(lat=lat, lng=lon)
+    if tz_name is None:
+        raise HTTPException(400, f"Cannot find timezone for {data.place}")
+    dt_local = datetime.strptime(data.datetime_local, "%Y-%m-%d %H:%M").replace(
+        tzinfo=zoneinfo.ZoneInfo(tz_name)
+    )
+    birth = BirthData(
+        name=data.place,
+        year=dt_local.year, month=dt_local.month, day=dt_local.day,
+        hour=dt_local.hour, minute=dt_local.minute,
+        lat=lat, lon=lon, tz=dt_local.utcoffset().total_seconds()/3600.0
+    )
+    return chart_light(birth)
+
