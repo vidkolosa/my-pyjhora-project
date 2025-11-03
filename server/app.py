@@ -96,32 +96,63 @@ def planet_data(jd_ut: float):
     return out, ayan
 
 def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict]:
-    # 7-karaka shema; Ketu izključen; Rahu: 30° - degree_in_sign
-    ranking = []
+    """
+    Jaimini Chara Karaka po JHora logiki:
+      - 7-karaka shema privzeto
+      - ob vezavi (tie) preklopi na 8-karaka (dodaj PiK)
+      - Ketu je vedno izključen
+      - Rahu uporablja pravilo: d = 30° - (lon % 30°)
+      - razvrščanje po d (degree-in-sign), večje = višji karaka
+
+    Vrnemo dict z 'scheme': '7-karaka' ali '8-karaka' in polji za vloge.
+    """
+    # priprava rangirnih vrednosti
+    rows = []
     for name, lon in sid_lon_by_planet.items():
         if name == "Ketu":
             continue
-        d = deg_in_sign(lon)
+        d = (lon % 30.0)
         if name == "Rahu":
             d = 30.0 - d
-            if abs(d - 30.0) < 1e-8:
+            if abs(d - 30.0) < 1e-12:
                 d = 0.0
-        ranking.append((name, d, lon))
-    ranking.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        rows.append({"planet": name, "deg_in_sign": d, "sid_lon": lon})
 
-    order = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
-             "Matrukaraka","Putrakaraka","Gnyatikaraka","Darakaraka"]
-    karakas = {}
-    for i, role in enumerate(order):
-        if i < len(ranking):
-            name, d, lon = ranking[i]
-            karakas[role] = {
-                "planet": name,
-                "degree_in_sign": round(d, 4),
-                "sidereal_longitude": round(lon, 6),
-                "sign": sign_of(lon),
-            }
-    return karakas
+    # sortiranje: najprej po deg_in_sign (desc), potem po sid_lon (desc)
+    rows.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
+
+    # preveri vezave (JHora primerja v natančnosti ~1 loka sekunde)
+    # 1" = 1/3600 deg ≈ 0.00027778
+    TIE_TOL = 1.0 / 3600.0 + 1e-9
+    has_tie = any(
+        abs(rows[i]["deg_in_sign"] - rows[i+1]["deg_in_sign"]) <= TIE_TOL
+        for i in range(len(rows)-1)
+    )
+
+    if has_tie:
+        roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka","Matrukaraka",
+                 "Pitrukaraka","Putrakaraka","Gnyatikaraka","Darakaraka"]
+    else:
+        roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka","Matrukaraka",
+                 "Putrakaraka","Gnyatikaraka","Darakaraka"]
+
+    out = {}
+    for i, role in enumerate(roles):
+        if i >= len(rows):
+            break
+        r = rows[i]
+        out[role] = {
+            "planet": r["planet"],
+            "degree_in_sign": round(r["deg_in_sign"], 6),
+            "sidereal_longitude": round(r["sid_lon"], 6),
+            "sign": sign_of(r["sid_lon"]),
+        }
+
+    out["_meta"] = {
+        "scheme": "8-karaka" if has_tie else "7-karaka",
+        "tie_tolerance_deg": TIE_TOL
+    }
+    return out
 
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
