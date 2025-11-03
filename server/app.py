@@ -107,8 +107,8 @@ def retrograde_map(jd_ut: float) -> Dict[str, bool]:
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
-    Placidus (Sripati) hiše in dodelitev planetov po intervalih med cuspami.
-    Stabilno čez vse različice pyswisseph (ne uporablja house_pos).
+    Placidus (Sripati) hiše in dodelitev po SIDERALNIH cuspih (JHora-parity).
+    SwissEph vrne tropične cuspe; tu jih pretvorimo v sideralne z isto ayanamšo.
     """
     # varno kliči swe.houses (nekje zahteva bytes 'P', drugje str)
     try:
@@ -118,35 +118,28 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
         hs = HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM
         cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
 
-    cusps = [norm360(c) for c in cusps[:12]]  # tropični cusp-i
-    asc_trop = norm360(ascmc[0])
+    # tropični cuspi + asc
+    cusps_trop = [norm360(c) for c in cusps[:12]]
+    asc_trop   = norm360(ascmc[0])
 
-    def house_of(lon_trop: float) -> int:
-        lon = norm360(lon_trop)
+    # ayanamša (Lahiri) in SIDERALNI cuspi
+    ayan = lahiri_ayanamsa_ut(jd_ut)
+    cusps_sid = [norm360(c - ayan) for c in cusps_trop]
+
+    # dodeljevanje hiš po SIDERALNIH cuspih
+    def house_of_sid(lon_sid: float) -> int:
+        lon = norm360(lon_sid)
         for i in range(12):
-            start = cusps[i]
-            end   = cusps[(i + 1) % 12]
+            start = cusps_sid[i]
+            end   = cusps_sid[(i + 1) % 12]
             arc   = (end - start) % 360
             to_pt = (lon - start) % 360
             if to_pt <= arc or math.isclose(to_pt, arc, rel_tol=1e-12, abs_tol=1e-8):
                 return i + 1
         return 12
 
-   # convert both cusps & planets to sidereal for bhava matching
-cusps_sid = [norm360(c - ayan) for c in cusps]
-def house_of_sid(lon_sid: float) -> int:
-    lon = norm360(lon_sid)
-    for i in range(12):
-        start = cusps_sid[i]
-        end   = cusps_sid[(i + 1) % 12]
-        arc   = (end - start) % 360
-        to_pt = (lon - start) % 360
-        if to_pt <= arc or math.isclose(to_pt, arc, rel_tol=1e-12, abs_tol=1e-8):
-            return i + 1
-    return 12
-
-planets_in_houses = {name: house_of_sid(v["sid_lon"]) for name, v in planets.items()}
-
+    planets_in_houses = {name: house_of_sid(v["sid_lon"]) for name, v in planets.items()}
+    return asc_trop, cusps_trop, planets_in_houses
 
 
 # ---------- Chara Karakas (JHora accurate) ----------
@@ -160,8 +153,8 @@ def compute_chara_karakas(
     JHora 8.0 exact Chara Karaka computation:
       • 8-karaka scheme (DK = Rahu)
       • Retro planets: degree_in_sign = 30° - (lon % 30°)
-      • Retro planets also sorted in reverse (lower degree = stronger)
-      • Sort order = by effective_deg (retro-aware), then by longitude
+      • Retro planets rangiramo obratno (nižja stopinja = močnejši)
+      • Sort: po effective_deg (retro-aware), nato po sid_longitude
       • Rahu degree = 30° - (lon % 30°)
     """
     if retro_by_planet is None:
@@ -172,7 +165,6 @@ def compute_chara_karakas(
         lon = sid_lon_by_planet[name]
         d = lon % 30.0
         retro = retro_by_planet.get(name, False)
-        # retro correction
         if retro:
             d = 30.0 - d
             if abs(d - 30.0) < 1e-12:
@@ -184,9 +176,9 @@ def compute_chara_karakas(
             "retro": retro
         })
 
-    # --- Custom JHora sorting rule ---
+    # JHora sort: retro so “obratno” rangirani
     def sort_key(r):
-        # Retro planets are ranked opposite: smaller deg_in_sign => higher rank
+        # za retro: manjši d => močnejši; za direktne: večji d => močnejši
         if r["retro"]:
             return (-(30.0 - r["deg_in_sign"]), -r["sid_lon"])
         else:
@@ -198,7 +190,7 @@ def compute_chara_karakas(
         "Atmakaraka","Amatyakaraka","Bhratrukaraka",
         "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"
     ]
-    out = {}
+    out: Dict[str, Dict] = {}
     for i, role in enumerate(roles):
         r = seven[i]
         out[role] = {
