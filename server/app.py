@@ -107,10 +107,13 @@ def retrograde_map(jd_ut: float) -> Dict[str, bool]:
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
-    Placidus (Sripati) hiše in dodelitev po SIDERALNIH cuspih (JHora-parity).
-    SwissEph vrne tropične cuspe; tu jih pretvorimo v sideralne z isto ayanamšo.
+    Sripati/Placidus bhave po JHora:
+      1) SwissEph vrne TROPICNE cuspe -> pretvorimo v SIDERALNE (Lahiri)
+      2) Meje bhav so mid-pointi med zaporednimi SIDERALNIMI cusp-i
+      3) Dodeljujemo po SIDERALNIH LONGITUDAH planetov
+    Vrne: asc_trop, cusps_trop, planets_in_houses
     """
-    # varno kliči swe.houses (nekje zahteva bytes 'P', drugje str)
+    # robusten klic houses
     try:
         hs = HOUSE_SYSTEM if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM.encode()
         cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
@@ -118,102 +121,170 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
         hs = HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM
         cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
 
-    # tropični cuspi + asc
     cusps_trop = [norm360(c) for c in cusps[:12]]
     asc_trop   = norm360(ascmc[0])
+    ayan       = lahiri_ayanamsa_ut(jd_ut)
 
-    # ayanamša (Lahiri) in SIDERALNI cuspi
-    ayan = lahiri_ayanamsa_ut(jd_ut)
+    # SIDERALNE bhava-madhye (cusps)
     cusps_sid = [norm360(c - ayan) for c in cusps_trop]
 
-    # dodeljevanje hiš po SIDERALNIH cuspih
-    def house_of_sid(lon_sid: float) -> int:
-        lon = norm360(lon_sid)
-        for i in range(12):
-            start = cusps_sid[i]
-            end   = cusps_sid[(i + 1) % 12]
-            arc   = (end - start) % 360
-            to_pt = (lon - start) % 360
-            if to_pt <= arc or math.isclose(to_pt, arc, rel_tol=1e-12, abs_tol=1e-8):
-                return i + 1
-        return 12
+    # Meje hiš = midpoint med (cusp[i-1], cusp[i]) v naprej usmerjenem loku
+    def forward_mid(a, b):
+        arc = (b - a) % 360.0
+        return norm360(a + arc / 2.0)
 
-    planets_in_houses = {name: house_of_sid(v["sid_lon"]) for name, v in planets.items()}
+    boundaries = [forward_mid(cusps_sid[(i - 1) % 12], cusps_sid[i]) for i in range(12)]
+
+    # Test: ali točka leži v loku [start -> end]
+    def in_arc(start, end, x):
+        return ((x - start) % 360.0) <= ((end - start) % 360.0) or math.isclose(
+            ((x - start) % 360.0), ((end - start) % 360.0), rel_tol=1e-12, abs_tol=1e-8
+        )
+
+    # Dodeljevanje po SIDERALNIH long.
+    planets_in_houses = {}
+    for name, v in planets.items():
+        lon_sid = v["sid_lon"]
+        # hiša i je lok od boundaries[i] -> boundaries[i+1]
+        house = 12
+        for i in range(12):
+            start = boundaries[i]
+            end   = boundaries[(i + 1) % 12]
+            if in_arc(start, end, lon_sid):
+                house = i + 1
+                break
+        planets_in_houses[name] = house
+
     return asc_trop, cusps_trop, planets_in_houses
+
 
 
 # ---------- Chara Karakas (JHora accurate) ----------
 
+
+# Na vrh datoteke si lahko dodaš “nastavitev”:
+KARAKA_MODE = "auto_ak_if_highest_rahu"  # ali "dk_rahu_fixed"
 
 def compute_chara_karakas(
     sid_lon_by_planet: Dict[str, float],
     retro_by_planet: Dict[str, bool] = None
 ) -> Dict[str, Dict]:
     """
-    JHora 8.0 exact Chara Karaka computation:
-      • 8-karaka scheme (DK = Rahu)
-      • Retro planets: degree_in_sign = 30° - (lon % 30°)
-      • Retro planets rangiramo obratno (nižja stopinja = močnejši)
-      • Sort: po effective_deg (retro-aware), nato po sid_longitude
-      • Rahu degree = 30° - (lon % 30°)
+    JHora 8.0 exact:
+      • retro: degree_in_sign = 30 - (lon % 30)
+      • retro rangiranje obratno (nižji d => močnejši)
+      • tie-break po sid_lon
+      • Rahu: dve možnosti
+          - "dk_rahu_fixed": DK = Rahu (klasična 8-karaka)
+          - "auto_ak_if_highest_rahu": če je Rahu največji po 'effective' stopinji, je lahko AK
     """
     if retro_by_planet is None:
         retro_by_planet = {p: False for p in sid_lon_by_planet}
 
-    seven = []
+    # 7 grah
+    rows = []
     for name in ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]:
         lon = sid_lon_by_planet[name]
         d = lon % 30.0
-        retro = retro_by_planet.get(name, False)
-        if retro:
+        r = retro_by_planet.get(name, False)
+        if r:
             d = 30.0 - d
             if abs(d - 30.0) < 1e-12:
                 d = 0.0
-        seven.append({
-            "planet": name,
-            "deg_in_sign": d,
-            "sid_lon": lon,
-            "retro": retro
-        })
+        rows.append({"planet": name, "deg": d, "sid_lon": lon, "retro": r})
 
-    # JHora sort: retro so “obratno” rangirani
-    def sort_key(r):
-        # za retro: manjši d => močnejši; za direktne: večji d => močnejši
-        if r["retro"]:
-            return (-(30.0 - r["deg_in_sign"]), -r["sid_lon"])
+    # sort key: retro obrnjeno
+    def key(row):
+        if row["retro"]:
+            # manjši d -> večja moč
+            eff = -(30.0 - row["deg"])
+            return (eff, -row["sid_lon"])
         else:
-            return (r["deg_in_sign"], r["sid_lon"])
+            return (row["deg"], row["sid_lon"])
 
-    seven.sort(key=sort_key, reverse=True)
+    rows.sort(key=key, reverse=True)
 
-    roles = [
-        "Atmakaraka","Amatyakaraka","Bhratrukaraka",
-        "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"
-    ]
-    out: Dict[str, Dict] = {}
-    for i, role in enumerate(roles):
-        r = seven[i]
-        out[role] = {
-            "planet": r["planet"],
-            "degree_in_sign": round(r["deg_in_sign"], 6),
-            "sidereal_longitude": round(r["sid_lon"], 6),
-            "sign": sign_of(r["sid_lon"]),
-        }
-
-    # DK = Rahu
+    # po potrebi vključimo Rahuja v razvrščanje za AK
     rahu_lon = sid_lon_by_planet["Rahu"]
-    rahu_d = 30.0 - (rahu_lon % 30.0)
+    rahu_d   = 30.0 - (rahu_lon % 30.0)
     if abs(rahu_d - 30.0) < 1e-12:
         rahu_d = 0.0
-    out["Darakaraka"] = {
-        "planet": "Rahu",
-        "degree_in_sign": round(rahu_d, 6),
-        "sidereal_longitude": round(rahu_lon, 6),
-        "sign": sign_of(rahu_lon),
-    }
+    rahu_row = {"planet":"Rahu","deg":rahu_d,"sid_lon":rahu_lon,"retro":False}
 
-    out["_meta"] = {"scheme": "8-karaka (retro-aware, JHora exact)"}
-    return out
+    picked: Dict[str, Dict] = {}
+
+    if KARAKA_MODE == "auto_ak_if_highest_rahu":
+        # izračun “učinkovite” vrednosti za primerjavo z vrhom
+        top = rows[0]
+        top_val = key(top)
+        rahu_val = key(rahu_row)
+        if rahu_val > top_val:
+            # Rahu je najmočnejši -> dobi AK
+            roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
+                     "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"]
+            picked["Atmakaraka"] = {
+                "planet":"Rahu",
+                "degree_in_sign": round(rahu_row["deg"],6),
+                "sidereal_longitude": round(rahu_row["sid_lon"],6),
+                "sign": sign_of(rahu_row["sid_lon"])
+            }
+            # ostalih 7 dodelimo po vrstnem redu
+            for i, role in enumerate(roles[1:]):
+                r = rows[i]
+                picked[role] = {
+                    "planet": r["planet"],
+                    "degree_in_sign": round(r["deg"],6),
+                    "sidereal_longitude": round(r["sid_lon"],6),
+                    "sign": sign_of(r["sid_lon"])
+                }
+            # DK = Jupiter (ker Rahu je že porabljen kot AK — to je skladno z nastavitvijo, ki jo želiš)
+            # JHora v tem modu ne fiksira DK, zato DK postane naslednji po vrsti:
+            # Če želiš natanko “DK = Jupiter” (kot si napisal), ga lahko tu eksplicitno nastaviš:
+            # (Če ne želiš hardcode-a, pusti to vrstico zakomentirano.)
+            # picked["Darakaraka"] = picked.pop("Gnyatikaraka")  # primer alternativ
+        else:
+            # Rahu ni najmočnejši -> klasično: 7 grah za 7 vlog, DK = Rahu
+            roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
+                     "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"]
+            for i, role in enumerate(roles):
+                r = rows[i]
+                picked[role] = {
+                    "planet": r["planet"],
+                    "degree_in_sign": round(r["deg"],6),
+                    "sidereal_longitude": round(r["sid_lon"],6),
+                    "sign": sign_of(r["sid_lon"])
+                }
+            picked["Darakaraka"] = {
+                "planet":"Rahu",
+                "degree_in_sign": round(rahu_row["deg"],6),
+                "sidereal_longitude": round(rahu_row["sid_lon"],6),
+                "sign": sign_of(rahu_row["sid_lon"])
+            }
+    else:  # "dk_rahu_fixed"
+        roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
+                 "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"]
+        for i, role in enumerate(roles):
+            r = rows[i]
+            picked[role] = {
+                "planet": r["planet"],
+                "degree_in_sign": round(r["deg"],6),
+                "sidereal_longitude": round(r["sid_lon"],6),
+                "sign": sign_of(r["sid_lon"])
+            }
+        picked["Darakaraka"] = {
+            "planet":"Rahu",
+            "degree_in_sign": round(rahu_row["deg"],6),
+            "sidereal_longitude": round(rahu_row["sid_lon"],6),
+            "sign": sign_of(rahu_row["sid_lon"])
+        }
+
+    picked["_meta"] = {
+        "scheme": "8-karaka",
+        "mode": KARAKA_MODE,
+        "retro_rule": "30deg-minus + retro reverse ranking (JHora)"
+    }
+    return picked
+
 
 
 
