@@ -132,20 +132,37 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
                 return i + 1
         return 12
 
-    planets_in_houses = {name: house_of(v["trop_lon"]) for name, v in planets.items()}
-    return asc_trop, cusps, planets_in_houses
+   # convert both cusps & planets to sidereal for bhava matching
+cusps_sid = [norm360(c - ayan) for c in cusps]
+def house_of_sid(lon_sid: float) -> int:
+    lon = norm360(lon_sid)
+    for i in range(12):
+        start = cusps_sid[i]
+        end   = cusps_sid[(i + 1) % 12]
+        arc   = (end - start) % 360
+        to_pt = (lon - start) % 360
+        if to_pt <= arc or math.isclose(to_pt, arc, rel_tol=1e-12, abs_tol=1e-8):
+            return i + 1
+    return 12
+
+planets_in_houses = {name: house_of_sid(v["sid_lon"]) for name, v in planets.items()}
+
+
 
 # ---------- Chara Karakas (JHora accurate) ----------
+
+
 def compute_chara_karakas(
     sid_lon_by_planet: Dict[str, float],
     retro_by_planet: Dict[str, bool] = None
 ) -> Dict[str, Dict]:
     """
-    JHora 8.0 accurate Chara Karaka computation:
-      - *prisiljena 8-karaka*: AK, AmK, BK, MK, PiK, PK, GK + DK=Rahu
-      - Retro popravek: če je planet retrograden, stopinjo v znamenju vzamemo kot (30° - (lon % 30°))
-      - Razvrščanje: po deg_in_sign DESC, nato po sid_longitude DESC (JHora tiebreak)
-      - Rahu: degree-in-sign = 30° - (lon % 30°); Ketu ignoriramo
+    JHora 8.0 exact Chara Karaka computation:
+      • 8-karaka scheme (DK = Rahu)
+      • Retro planets: degree_in_sign = 30° - (lon % 30°)
+      • Retro planets also sorted in reverse (lower degree = stronger)
+      • Sort order = by effective_deg (retro-aware), then by longitude
+      • Rahu degree = 30° - (lon % 30°)
     """
     if retro_by_planet is None:
         retro_by_planet = {p: False for p in sid_lon_by_planet}
@@ -154,19 +171,34 @@ def compute_chara_karakas(
     for name in ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]:
         lon = sid_lon_by_planet[name]
         d = lon % 30.0
-        if retro_by_planet.get(name, False):
+        retro = retro_by_planet.get(name, False)
+        # retro correction
+        if retro:
             d = 30.0 - d
             if abs(d - 30.0) < 1e-12:
                 d = 0.0
-        seven.append({"planet": name, "deg_in_sign": d, "sid_lon": lon})
+        seven.append({
+            "planet": name,
+            "deg_in_sign": d,
+            "sid_lon": lon,
+            "retro": retro
+        })
 
-    seven.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
+    # --- Custom JHora sorting rule ---
+    def sort_key(r):
+        # Retro planets are ranked opposite: smaller deg_in_sign => higher rank
+        if r["retro"]:
+            return (-(30.0 - r["deg_in_sign"]), -r["sid_lon"])
+        else:
+            return (r["deg_in_sign"], r["sid_lon"])
+
+    seven.sort(key=sort_key, reverse=True)
 
     roles = [
         "Atmakaraka","Amatyakaraka","Bhratrukaraka",
         "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"
     ]
-    out: Dict[str, Dict] = {}
+    out = {}
     for i, role in enumerate(roles):
         r = seven[i]
         out[role] = {
@@ -176,7 +208,7 @@ def compute_chara_karakas(
             "sign": sign_of(r["sid_lon"]),
         }
 
-    # DK = Rahu (vedno)
+    # DK = Rahu
     rahu_lon = sid_lon_by_planet["Rahu"]
     rahu_d = 30.0 - (rahu_lon % 30.0)
     if abs(rahu_d - 30.0) < 1e-12:
@@ -188,8 +220,10 @@ def compute_chara_karakas(
         "sign": sign_of(rahu_lon),
     }
 
-    out["_meta"] = {"scheme": "8-karaka (retro-corrected, JHora)"}
+    out["_meta"] = {"scheme": "8-karaka (retro-aware, JHora exact)"}
     return out
+
+
 
 # --------- FastAPI ----------
 app = FastAPI(title="My PyJHora API", version="0.5.0")
