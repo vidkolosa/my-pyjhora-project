@@ -49,6 +49,19 @@ def julday_ut(y,m,d,h,mi,tz) -> float:
     ut = h + mi/60.0 - tz
     return swe.julday(y, m, d, ut)
 
+# ---------- Ephemeris helpers ----------
+_PLANET_CODES = {
+    "Sun":     swe.SUN,
+    "Moon":    swe.MOON,
+    "Mars":    swe.MARS,
+    "Mercury": swe.MERCURY,
+    "Jupiter": swe.JUPITER,
+    "Venus":   swe.VENUS,
+    "Saturn":  swe.SATURN,
+    "Rahu":    NODE_CODE,
+    "Ketu":    NODE_CODE,  # iz Rahuja +180
+}
+
 def planet_data(jd_ut: float):
     """
     Vrne:
@@ -56,21 +69,11 @@ def planet_data(jd_ut: float):
       ayan (deg)
     """
     ayan = lahiri_ayanamsa_ut(jd_ut)
-    bodies = {
-        "Sun":     swe.SUN,
-        "Moon":    swe.MOON,
-        "Mars":    swe.MARS,
-        "Mercury": swe.MERCURY,
-        "Jupiter": swe.JUPITER,
-        "Venus":   swe.VENUS,
-        "Saturn":  swe.SATURN,
-        "Rahu":    NODE_CODE,  # mean node
-        "Ketu":    NODE_CODE,  # iz Rahuja +180
-    }
     out = {}
     rahu_lon, rahu_lat = None, 0.0
-    for name, code in bodies.items():
+    for name, code in _PLANET_CODES.items():
         if name == "Ketu":
+            # 180° od Rahuja
             trop_lon = norm360(rahu_lon + 180.0)
             sid_lon  = norm360(trop_lon - ayan)
             out["Ketu"] = {"trop_lon": trop_lon, "trop_lat": rahu_lat, "sid_lon": sid_lon}
@@ -85,6 +88,22 @@ def planet_data(jd_ut: float):
             "sid_lon":  norm360(lon_trop - ayan),
         }
     return out, ayan
+
+def retrograde_map(jd_ut: float) -> Dict[str, bool]:
+    """
+    Vrne retrogradnost za Sun..Saturn. Uporabi SwissEph speed (xx[3] < 0 => retro).
+    Rahu/Ketu nas tu ne zanimata (vedno False).
+    """
+    retro = {p: False for p in _PLANET_CODES.keys()}
+    for name in ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]:
+        code = _PLANET_CODES[name]
+        # Potrebujemo speed -> FLG_SPEED
+        xx, _ = swe.calc_ut(jd_ut, code, swe.FLG_SPEED)
+        lon_speed = xx[3] if len(xx) >= 4 else 0.0
+        retro[name] = (lon_speed < 0.0)
+    retro["Rahu"] = False
+    retro["Ketu"] = False
+    return retro
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
@@ -116,29 +135,37 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
     planets_in_houses = {name: house_of(v["trop_lon"]) for name, v in planets.items()}
     return asc_trop, cusps, planets_in_houses
 
-
-
-def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict]:
+# ---------- Chara Karakas (JHora accurate) ----------
+def compute_chara_karakas(
+    sid_lon_by_planet: Dict[str, float],
+    retro_by_planet: Dict[str, bool] = None
+) -> Dict[str, Dict]:
     """
-    JHora-style *forced 8-karaka*:
-      - rangiramo 7 grah (Sun..Saturn) po degree-in-sign (desc), tie-break po lon (desc)
-      - razdelimo vloge: AK, AmK, BK, MK, PiK, PK, GK
-      - Darakaraka = vedno Rahu (mean node)
-      - Ketu je vedno izključen
-    To se ujema z izpisom, kot ga imaš v JHora (Sun=PiK, PK=Jupiter, GK=Mercury, DK=Rahu).
+    JHora 8.0 accurate Chara Karaka computation:
+      - *prisiljena 8-karaka*: AK, AmK, BK, MK, PiK, PK, GK + DK=Rahu
+      - Retro popravek: če je planet retrograden, stopinjo v znamenju vzamemo kot (30° - (lon % 30°))
+      - Razvrščanje: po deg_in_sign DESC, nato po sid_longitude DESC (JHora tiebreak)
+      - Rahu: degree-in-sign = 30° - (lon % 30°); Ketu ignoriramo
     """
+    if retro_by_planet is None:
+        retro_by_planet = {p: False for p in sid_lon_by_planet}
+
     seven = []
     for name in ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]:
         lon = sid_lon_by_planet[name]
         d = lon % 30.0
+        if retro_by_planet.get(name, False):
+            d = 30.0 - d
+            if abs(d - 30.0) < 1e-12:
+                d = 0.0
         seven.append({"planet": name, "deg_in_sign": d, "sid_lon": lon})
 
-    # višja stopnja v znamenju -> višji karaka; ob enakosti večja sid. dolžina
     seven.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
 
-    roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
-             "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"]
-
+    roles = [
+        "Atmakaraka","Amatyakaraka","Bhratrukaraka",
+        "Matrukaraka","Pitrukaraka","Putrakaraka","Gnyatikaraka"
+    ]
     out: Dict[str, Dict] = {}
     for i, role in enumerate(roles):
         r = seven[i]
@@ -149,7 +176,7 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
             "sign": sign_of(r["sid_lon"]),
         }
 
-    # DK = Rahu
+    # DK = Rahu (vedno)
     rahu_lon = sid_lon_by_planet["Rahu"]
     rahu_d = 30.0 - (rahu_lon % 30.0)
     if abs(rahu_d - 30.0) < 1e-12:
@@ -161,16 +188,11 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
         "sign": sign_of(rahu_lon),
     }
 
-    out["_meta"] = {"scheme": "8-karaka (forced JHora setting)"}
+    out["_meta"] = {"scheme": "8-karaka (retro-corrected, JHora)"}
     return out
 
-
-
-
-
-
 # --------- FastAPI ----------
-app = FastAPI(title="My PyJHora API", version="0.4.0")
+app = FastAPI(title="My PyJHora API", version="0.5.0")
 
 class BirthData(BaseModel):
     name: Optional[str] = None
@@ -201,13 +223,16 @@ def chart(data: BirthData):
         planets, ayan = planet_data(jd)
         sid_only = {k: v["sid_lon"] for k, v in planets.items()}
 
+        # retro status (JHora natančnost)
+        retro_map = retrograde_map(jd)
+
         # hiše
         asc_trop, cusps_trop, planets_in_houses = placidus_houses_and_positions(
             jd, data.lat, data.lon, planets
         )
 
         # čara karake (JHora)
-        karakas = compute_chara_karakas(sid_only)
+        karakas = compute_chara_karakas(sid_only, retro_map)
 
         # planeti izpis (trop/sid + hiša)
         planets_out = {}
@@ -216,6 +241,7 @@ def chart(data: BirthData):
                 "tropical": {"longitude": round(v["trop_lon"], 6), "sign": sign_of(v["trop_lon"])},
                 "sidereal": {"longitude": round(v["sid_lon"], 6),  "sign": sign_of(v["sid_lon"])},
                 "house": planets_in_houses[name],
+                "retrograde": bool(retro_map.get(name, False))
             }
 
         # cusps: tropični in sideralni (Lahiri)
@@ -317,4 +343,3 @@ def chart_place_light(data: PlaceDataLight):
         lat=lat, lon=lon, tz=dt_local.utcoffset().total_seconds()/3600.0
     )
     return chart_light(birth)
-
