@@ -384,35 +384,45 @@ def geocode_place(place: str) -> Tuple[float, float]:
     d = r.json()[0]
     return float(d["lat"]), float(d["lon"])
 
+# --- robustna različica, sprejme body ali plain fields ---
+from fastapi import Body
+
+class PlaceData(BaseModel):
+    place: str = Field(..., description="City, Country (e.g. 'Maribor, Slovenia')")
+    datetime_local: str = Field(..., description="YYYY-MM-DD HH:MM (local time)")
+
 @app.post("/chart_place")
-def chart_place(data: PlaceData):
+def chart_place(
+    data: Optional[PlaceData] = None,
+    place: Optional[str] = Body(None),
+    datetime_local: Optional[str] = Body(None),
+):
     try:
+        # združi možne oblike
+        if data is None:
+            if not place or not datetime_local:
+                raise HTTPException(400, "Provide JSON body or both 'place' and 'datetime_local'.")
+            data = PlaceData(place=place, datetime_local=datetime_local)
+
         lat, lon = geocode_place(data.place)
         tz_name = _tf.timezone_at(lat=lat, lng=lon)
         if tz_name is None:
             raise HTTPException(400, f"Cannot find timezone for {data.place}")
 
-        # lokalni čas (aware)
-        dt_local_naive = datetime.strptime(data.datetime_local, "%Y-%m-%d %H:%M")
-        tzinfo = zoneinfo.ZoneInfo(tz_name)
-        dt_local = dt_local_naive.replace(tzinfo=tzinfo)
-
+        dt_local = datetime.strptime(data.datetime_local, "%Y-%m-%d %H:%M") \
+            .replace(tzinfo=zoneinfo.ZoneInfo(tz_name))
         offset_hours = dt_local.utcoffset().total_seconds() / 3600.0
 
         birth = BirthData(
             name=data.place,
-            year=dt_local.year,
-            month=dt_local.month,
-            day=dt_local.day,
-            hour=dt_local.hour,
-            minute=dt_local.minute,
-            lat=lat,
-            lon=lon,
-            tz=offset_hours
+            year=dt_local.year, month=dt_local.month, day=dt_local.day,
+            hour=dt_local.hour, minute=dt_local.minute,
+            lat=lat, lon=lon, tz=offset_hours
         )
         return chart(birth)
     except Exception as e:
         raise HTTPException(400, f"chart_place error: {e}")
+
 
 # --- Lite različice za GPT (majhen JSON) ---
 
