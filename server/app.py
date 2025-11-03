@@ -107,53 +107,57 @@ def retrograde_map(jd_ut: float) -> Dict[str, bool]:
 
 def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets):
     """
-    Sripati/Placidus bhave po JHora:
-      1) SwissEph vrne TROPICNE cuspe -> pretvorimo v SIDERALNE (Lahiri)
-      2) Meje bhav so mid-pointi med zaporednimi SIDERALNIMI cusp-i
-      3) Dodeljujemo po SIDERALNIH LONGITUDAH planetov
+    JHora-parity za Sripati/Placidus:
+
+    1) Placidus cuspe izračunamo v TROPIČNEM zodiaku prek swe.houses(...)
+    2) Planete po hišah dodelimo z SwissEph house_pos na PODLAGI TROPIČNIH
+       ekliptičnih koordinat (lon/lat).
+    3) Za izpis še vedno lahko prikažemo tudi sideralne cuspe (asc/cusps - ayan).
+
     Vrne: asc_trop, cusps_trop, planets_in_houses
     """
-    # robusten klic houses
+    # robusten klic za 'P' (Placidus)
     try:
-        hs = HOUSE_SYSTEM if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM.encode()
-        cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
+        hsys = HOUSE_SYSTEM if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM.encode()
+        cusps_trop, ascmc = swe.houses(jd_ut, geolat, geolon, hsys)
     except Exception:
-        hs = HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM
-        cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
+        hsys = HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM
+        cusps_trop, ascmc = swe.houses(jd_ut, geolat, geolon, hsys)
 
-    cusps_trop = [norm360(c) for c in cusps[:12]]
-    asc_trop   = norm360(ascmc[0])
-    ayan       = lahiri_ayanamsa_ut(jd_ut)
+    # tropični ascendent
+    asc_trop = norm360(ascmc[0])
 
-    # SIDERALNE bhava-madhye (cusps)
-    cusps_sid = [norm360(c - ayan) for c in cusps_trop]
+    # za house_pos potrebujemo eklipt. poševnost (true obliquity)
+    # v Python vmesniku jo dobimo prek calc_ut(..., swe.ECL_NUT)
+    ecl, _ = swe.calc_ut(jd_ut, swe.ECL_NUT)  # ecl[0] = obliquity (deg)
+    eps = float(ecl[0])
 
-    # Meje hiš = midpoint med (cusp[i-1], cusp[i]) v naprej usmerjenem loku
-    def forward_mid(a, b):
-        arc = (b - a) % 360.0
-        return norm360(a + arc / 2.0)
+    # Normaliziraj tropične cuspe (seznam dolžine 12)
+    cusps_trop = [norm360(c) for c in cusps_trop[:12]]
 
-    boundaries = [forward_mid(cusps_sid[(i - 1) % 12], cusps_sid[i]) for i in range(12)]
-
-    # Test: ali točka leži v loku [start -> end]
-    def in_arc(start, end, x):
-        return ((x - start) % 360.0) <= ((end - start) % 360.0) or math.isclose(
-            ((x - start) % 360.0), ((end - start) % 360.0), rel_tol=1e-12, abs_tol=1e-8
-        )
-
-    # Dodeljevanje po SIDERALNIH long.
     planets_in_houses = {}
+
+    # Dodeljevanje po TROPIČNIH koord. (lon/lat) z house_pos
+    # house_pos signatura v PySwisseph:
+    #   swe.house_pos(armc, geolat, eps, hsys, lon, lat)
+    armc = ascmc[2]  # ARMC iz swe.houses rezultata
+
     for name, v in planets.items():
-        lon_sid = v["sid_lon"]
-        # hiša i je lok od boundaries[i] -> boundaries[i+1]
-        house = 12
-        for i in range(12):
-            start = boundaries[i]
-            end   = boundaries[(i + 1) % 12]
-            if in_arc(start, end, lon_sid):
-                house = i + 1
-                break
-        planets_in_houses[name] = house
+        lon_trop = v["trop_lon"]
+        lat_trop = v["trop_lat"] if "trop_lat" in v else 0.0
+        try:
+            # večina buildov
+            h = swe.house_pos(armc, geolat, eps, hsys, lon_trop, lat_trop)
+        except TypeError:
+            # fallback: če kdo pričakuje str namesto bytes
+            h = swe.house_pos(armc, geolat, eps,
+                              (hsys.decode() if isinstance(hsys, (bytes, bytearray)) else hsys),
+                              lon_trop, lat_trop)
+        # house_pos vrne realno število; 1.0–12.999..., zato ga zaokrožimo navzgor na celo hišo
+        house_num = int(math.ceil(h)) if h > 0 else 12
+        if house_num > 12:
+            house_num = ((house_num - 1) % 12) + 1
+        planets_in_houses[name] = house_num
 
     return asc_trop, cusps_trop, planets_in_houses
 
