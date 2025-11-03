@@ -116,42 +116,53 @@ def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, pl
     planets_in_houses = {name: house_of(v["trop_lon"]) for name, v in planets.items()}
     return asc_trop, cusps, planets_in_houses
 
+
+
 def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict]:
     """
-    JHora-logika čara karak:
-      - 7-karaka privzeto: AK, AmK, BK, MK, PK, GK, DK (iz 7 grah Sun..Saturn).
-      - Ob vezavi (tie) -> 8-karaka: dodamo PiK, in **DK = Rahu**.
-      - Ketu je vedno izključen; Rahu se v 7-karaki ne uporablja.
-      - Rahu degree-in-sign = 30° - (lon % 30°).
+    JHora 8.0 Chara Karaka algorithm (Parashara system).
+    - Uses 7-karaka (Sun..Saturn); adds Rahu if tie occurs (8-karaka).
+    - Rahu's degree-in-sign = 30° - (lon % 30°)
+    - Sorted descending by degree-in-sign (highest degree = AK)
+    - If tie -> include Rahu as DK
     """
-    # 7 grah
-    order_planets = ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]
-    rows = []
-    for name in order_planets:
+    # Grahas (Sun..Saturn)
+    main_grahas = ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"]
+    entries = []
+    for name in main_grahas:
         lon = sid_lon_by_planet[name]
-        d = lon % 30.0
-        rows.append({"planet": name, "deg_in_sign": d, "sid_lon": lon})
-    # sort: višja stopnja → višji karaka; ob enakosti večja lon
-    rows.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
+        deg_in_sign = lon % 30.0
+        entries.append({
+            "planet": name,
+            "deg_in_sign": deg_in_sign,
+            "sid_lon": lon
+        })
 
-    # vezava ~1 loka sekunda
-    TIE_TOL = (1.0 / 3600.0) + 1e-10
-    has_tie = any(abs(rows[i]["deg_in_sign"] - rows[i+1]["deg_in_sign"]) <= TIE_TOL
-                  for i in range(len(rows)-1))
+    # Sort descending by degree-in-sign
+    entries.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
 
-    out: Dict[str, Dict] = {}
+    # Check for tie
+    TOL = (1.0 / 3600.0)  # 1 arcsecond
+    has_tie = any(abs(entries[i]["deg_in_sign"] - entries[i+1]["deg_in_sign"]) <= TOL
+                  for i in range(len(entries)-1))
+
+    out = {}
+
     if has_tie:
-        # 8-karaka z DK=Rahu
-        roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka","Matrukaraka",
-                 "Pitrukaraka","Putrakaraka","Gnyatikaraka"]
+        # 8-karaka (include Rahu as DK)
+        roles = [
+            "Atmakaraka", "Amatyakaraka", "Bhratrukaraka", "Matrukaraka",
+            "Putrakaraka", "Gnyatikaraka", "Pitrukaraka"
+        ]
         for i, role in enumerate(roles):
-            r = rows[i]
+            r = entries[i]
             out[role] = {
                 "planet": r["planet"],
                 "degree_in_sign": round(r["deg_in_sign"], 6),
                 "sidereal_longitude": round(r["sid_lon"], 6),
-                "sign": sign_of(r["sid_lon"]),
+                "sign": sign_of(r["sid_lon"])
             }
+        # DK = Rahu (reverse degree-in-sign)
         rahu_lon = sid_lon_by_planet["Rahu"]
         rahu_d = 30.0 - (rahu_lon % 30.0)
         if abs(rahu_d - 30.0) < 1e-12:
@@ -160,24 +171,30 @@ def compute_chara_karakas(sid_lon_by_planet: Dict[str, float]) -> Dict[str, Dict
             "planet": "Rahu",
             "degree_in_sign": round(rahu_d, 6),
             "sidereal_longitude": round(rahu_lon, 6),
-            "sign": sign_of(rahu_lon),
+            "sign": sign_of(rahu_lon)
         }
         scheme = "8-karaka (DK=Rahu)"
     else:
-        roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
-                 "Matrukaraka","Putrakaraka","Gnyatikaraka","Darakaraka"]
+        # Standard 7-karaka
+        roles = [
+            "Atmakaraka", "Amatyakaraka", "Bhratrukaraka",
+            "Matrukaraka", "Putrakaraka", "Gnyatikaraka", "Darakaraka"
+        ]
         for i, role in enumerate(roles):
-            r = rows[i]
+            r = entries[i]
             out[role] = {
                 "planet": r["planet"],
                 "degree_in_sign": round(r["deg_in_sign"], 6),
                 "sidereal_longitude": round(r["sid_lon"], 6),
-                "sign": sign_of(r["sid_lon"]),
+                "sign": sign_of(r["sid_lon"])
             }
         scheme = "7-karaka"
 
-    out["_meta"] = {"scheme": scheme, "tie_tolerance_deg": TIE_TOL}
+    out["_meta"] = {"scheme": scheme, "tie_tolerance_deg": TOL}
     return out
+
+
+
 
 # --------- FastAPI ----------
 app = FastAPI(title="My PyJHora API", version="0.4.0")
