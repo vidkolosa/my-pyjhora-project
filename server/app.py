@@ -116,16 +116,31 @@ def chart_full(data: BirthData):
         "chara_karakas": chara_karakas(pl)
     }
 
-# tvoj "place" demo – Maribor
 @app.post("/chart_place")
 def chart_place(payload: Dict):
-    place = payload.get("place"); dt = payload.get("datetime_local")
+    place = payload.get("place")
+    dt = payload.get("datetime_local")
     if not place or not dt:
         raise HTTPException(400, "Missing 'place' or 'datetime_local'")
-    if "Maribor" in place:
+
+    # 🧭 1️⃣ preveri če vsebuje 'N'/'S' in 'E'/'W' → obravnava kot koordinate
+    import re
+    coord_pattern = r"(\d+)[°' ]+(\d+)?[ ]*([NS]),[ ]*(\d+)[°' ]+(\d+)?[ ]*([EW])"
+    m = re.search(coord_pattern, place.replace("°", "'"))
+    if m:
+        lat_deg = float(m.group(1)) + (float(m.group(2) or 0) / 60)
+        lon_deg = float(m.group(4)) + (float(m.group(5) or 0) / 60)
+        if m.group(3) == "S":
+            lat_deg = -lat_deg
+        if m.group(6) == "W":
+            lon_deg = -lon_deg
+        lat, lon = lat_deg, lon_deg
+    elif "Maribor" in place:
         lat, lon = 46.55, 15.98
     else:
-        raise HTTPException(400, "Place not supported in demo chart_place")
+        raise HTTPException(400, "Unsupported 'place' format. Use 'City, Country' or coordinates like '21 N 27, 83 E 58'.")
+
+    # 🕒 pretvori datum in čas
     y, m, d = map(int, dt.split(" ")[0].split("-"))
     hh, mm = map(int, dt.split(" ")[1].split(":"))
     bd = BirthData(year=y, month=m, day=d, hour=hh, minute=mm, lat=lat, lon=lon)
