@@ -137,6 +137,26 @@ def parse_place_to_latlon(txt: str) -> Optional[tuple]:
 
     return None
 
+
+
+# --- Warm-up on startup (preload ephemeris + prvi izračun) ---
+from fastapi import BackgroundTasks
+
+def _warm_once():
+    try:
+        # hiter dummy izračun, da se vse knjižnice naložijo v RAM
+        bd = BirthData(year=2000, month=1, day=1, hour=0, minute=0, lat=0.0, lon=0.0, tz=0)
+        _ = chart_full(bd)  # ignoriramo rezultat
+    except Exception:
+        pass
+
+@app.on_event("startup")
+def _startup_warm():
+    _warm_once()
+
+
+
+
 # ----------------- FastAPI -----------------
 app = FastAPI(title="JHora PyAPI", version=APP_VERSION)
 
