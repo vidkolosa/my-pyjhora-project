@@ -81,29 +81,55 @@ def health():
     return {"ok":True,"version":APP_VERSION,"ephe_loaded":ephe_ok}
 
 @app.post("/chart_full")
-def chart_full(data:BirthData):
-    jd=julday_ut(data)
-    pl=planets_sid(jd)
-    bhavas,asc=sripati_houses(jd,data.lat,data.lon)
-    # planet → bhava
-    intervals=[]
+def chart_full(data: BirthData):
+    jd = julday_ut(data)
+    pl = planets_sid(jd)
+
+    # Sripati/Porphyry – dobimo 12 bhava MADDHY (središča) in Asc
+    bhava_madhya, asc = sripati_houses(jd, data.lat, data.lon)
+
+    # PRAVILNO: meje bhav (SANDHI) so sredine med sosednjima madhyama
+    sandhi = []
     for i in range(12):
-        s=bhavas[i]; e=bhavas[(i+1)%12]
-        if e<s: e+=360
-        intervals.append((s,e))
-    ph={}
-    for p,lon in pl.items():
-        L=lon
-        for i,(s,e) in enumerate(intervals):
-            if s<=L<e or s<=L+360<e:
-                ph[p]=i+1; break
-    return {
-        "ayanamsa":"Lahiri","house_system":"Sripati",
-        "ascendant":{"deg":round(asc,2),"sign":sign_of(asc)},
-        "bhavas":{f"Bhava{i+1}":round(b,2) for i,b in enumerate(bhavas)},
-        "planets":{p:{"deg":round(lon,2),"sign":sign_of(lon),"bhava":ph[p]} for p,lon in pl.items()},
-        "chara_karakas":chara_karakas(pl)
+        a = bhava_madhya[i]
+        b = bhava_madhya[(i + 1) % 12]
+        # sredina na krogu
+        span = (b - a) % 360.0
+        sandhi.append((a + span / 2.0) % 360.0)
+
+    # planet -> bhava po intervalu sandhi[i] → sandhi[i+1]
+    def bhava_index(lon: float) -> int:
+        L = lon % 360.0
+        for i in range(12):
+            start = sandhi[i]
+            end = sandhi[(i + 1) % 12]
+            if end < start:  # wrap čez 0°
+                if L >= start or L < end:
+                    return i + 1
+            else:
+                if start <= L < end:
+                    return i + 1
+        return 12
+
+    planets = {
+        p: {
+            "deg": round(lon, 2),
+            "sign": sign_of(lon),
+            "bhava": bhava_index(lon)
+        }
+        for p, lon in pl.items()
     }
+
+    return {
+        "ayanamsa": "Lahiri",
+        "house_system": "Sripati",
+        "ascendant": {"deg": round(asc, 2), "sign": sign_of(asc)},
+        "bhavas": {f"Bhava{i+1}": round(b, 2) for i, b in enumerate(bhava_madhya)},
+        "bhava_sandhis": [round(x, 2) for x in sandhi],
+        "planets": planets,
+        "chara_karakas": chara_karakas(pl)
+    }
+
 
 # Tvoj “place” test – demo za Maribor
 @app.post("/chart_place")
