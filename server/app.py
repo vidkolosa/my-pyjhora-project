@@ -1,8 +1,7 @@
 # server/app.py
 import os, sys, math
 from typing import Optional, Dict, Tuple
-
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from timezonefinder import TimezoneFinder
@@ -10,9 +9,7 @@ from datetime import datetime
 import zoneinfo
 import requests
 
-# -----------------------------
-#   Repo import (src/ on path)
-# -----------------------------
+# --- add src/ on path (repo jhora + swe) ---
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
@@ -20,28 +17,23 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 try:
+    import jhora  # noqa: F401
     import swisseph as swe
 except Exception as e:
-    raise RuntimeError(f"Cannot import Swiss Ephemeris: {e}")
+    raise RuntimeError(f"Cannot import jhora/swe: {e}")
 
-# -----------------------------
-#   Ephemeris path
-# -----------------------------
+# --- ephemerides ---
 EPHE_PATH = os.path.join(SRC, "jhora", "data", "ephe")
 os.makedirs(EPHE_PATH, exist_ok=True)
 swe.set_ephe_path(EPHE_PATH)
 
-# -----------------------------
-#   JHora 8.0 – key settings
-# -----------------------------
-AYANAMSHA_MODE = swe.SIDM_LAHIRI     # Traditional Lahiri
-NODE_CODE      = swe.MEAN_NODE       # Mean node
-HOUSE_SYSTEM   = b'P'                # Sripati/Placidus (P)
+# --- JHora 8.0 style settings ---
+AYANAMSHA_MODE = swe.SIDM_LAHIRI         # Traditional Lahiri
+NODE_CODE      = swe.MEAN_NODE           # Mean Node
+HOUSE_SYSTEM   = b'P'                    # Sripati/Placidus (P)
 
-SIGNS = [
-    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
-    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
-]
+SIGNS = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo",
+         "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
 
 def norm360(x: float) -> float:
     return x % 360.0
@@ -53,23 +45,18 @@ def lahiri_ayanamsa_ut(jd_ut: float) -> float:
     swe.set_sid_mode(AYANAMSHA_MODE, 0, 0)
     return float(swe.get_ayanamsa_ut(jd_ut))
 
-def julday_ut(y: int, m: int, d: int, h: int, mi: int, tz: float) -> float:
+def julday_ut(y,m,d,h,mi,tz) -> float:
     ut = h + mi/60.0 - tz
     return swe.julday(y, m, d, ut)
 
-# -------------------------------------------
-#   Planets (tropical & sidereal) + retro
-# -------------------------------------------
 def planet_data(jd_ut: float):
     """
-    Returns:
+    Return:
       planets[name] = {
-        "trop_lon", "trop_lat", "sid_lon", "retro"
-      }
-      ayan
+         'trop_lon','trop_lat','sid_lon','retro'
+      },  ayan (deg)
     """
     ayan = lahiri_ayanamsa_ut(jd_ut)
-
     bodies = {
         "Sun":     swe.SUN,
         "Moon":    swe.MOON,
@@ -79,137 +66,115 @@ def planet_data(jd_ut: float):
         "Venus":   swe.VENUS,
         "Saturn":  swe.SATURN,
         "Rahu":    NODE_CODE,  # mean node
-        "Ketu":    NODE_CODE,  # derived (+180)
+        "Ketu":    NODE_CODE,  # computed from Rahu
     }
-
-    out: Dict[str, Dict] = {}
-    rahu_lon, rahu_lat, rahu_retro = None, 0.0, True
-
+    out = {}
+    rahu_lon, rahu_lat, rahu_retro = None, 0.0, False
     for name, code in bodies.items():
         if name == "Ketu":
-            # derive from Rahu
-            if rahu_lon is None:
-                raise RuntimeError("Rahu must be computed before Ketu.")
             trop_lon = norm360(rahu_lon + 180.0)
             sid_lon  = norm360(trop_lon - ayan)
-            out["Ketu"] = {
-                "trop_lon": trop_lon,
-                "trop_lat": rahu_lat,
-                "sid_lon":  sid_lon,
-                "retro":    True,   # ketu retro by convention
-            }
+            out["Ketu"] = {"trop_lon": trop_lon, "trop_lat": rahu_lat,
+                           "sid_lon": sid_lon, "retro": rahu_retro}
             continue
-
-        xx, _ = swe.calc_ut(jd_ut, code)   # xx[0]=lon, xx[1]=lat, xx[3]=speed in lon
+        xx, _ = swe.calc_ut(jd_ut, code)
         lon_trop, lat_trop, spd = norm360(xx[0]), xx[1], xx[3]
-        retro = (spd < 0.0)
-
         if name == "Rahu":
-            rahu_lon, rahu_lat, rahu_retro = lon_trop, lat_trop, True  # node is retro-like
-
+            rahu_lon, rahu_lat, rahu_retro = lon_trop, lat_trop, (spd < 0)
         out[name] = {
             "trop_lon": lon_trop,
             "trop_lat": lat_trop,
             "sid_lon":  norm360(lon_trop - ayan),
-            "retro":    True if name in ("Rahu","Ketu") else retro
+            "retro":    (spd < 0),
         }
-
     return out, ayan
 
-# --------------------------------------------------
-#   Houses: Placidus/Sripati with robust assignment
-# --------------------------------------------------
-def placidus_houses_and_positions(jd_ut: float, geolat: float, geolon: float, planets: Dict[str, Dict]):
-    """
-    1) compute tropical cusps via swe.houses
-    2) assign houses with swe.house_pos if available
-       (fallback to arc-interval method with inclusive end)
-    """
-    # some builds require bytes, some str
+def _houses_placidus(jd_ut: float, geolat: float, geolon: float):
+    """Swiss Ephemeris Placidus cusps (tropical)."""
     try:
         hs = HOUSE_SYSTEM if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM.encode()
         cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
     except Exception:
         hs = HOUSE_SYSTEM.decode() if isinstance(HOUSE_SYSTEM, bytes) else HOUSE_SYSTEM
         cusps, ascmc = swe.houses(jd_ut, geolat, geolon, hs)
-
     cusps = [norm360(c) for c in cusps[:12]]
-    asc_trop = norm360(ascmc[0])  # ascmc[0] is Asc in pyswisseph (trop)
+    asc_trop = norm360(ascmc[0])
+    return asc_trop, cusps
 
-    def house_of_interval(lon_trop: float) -> int:
-        lon = norm360(lon_trop)
-        for i in range(12):
-            start = cusps[i]
-            end   = cusps[(i + 1) % 12]
-            arc   = (end - start) % 360
-            to_pt = (lon - start) % 360
-            # inclusive end to avoid fencepost when planet sits on cusp
-            if to_pt <= arc or math.isclose(to_pt, arc, rel_tol=1e-12, abs_tol=1e-8):
-                return i + 1
-        return 12
+def _house_index_from_sidereal(cusps_sid, lon_sid) -> int:
+    """
+    Assign house by moving along SIDEREAL cusps 1..12.
+    Matches JHora behavior when used with Lahiri sidereal.
+    """
+    L = norm360(lon_sid)
+    for i in range(12):
+        start = cusps_sid[i]
+        end   = cusps_sid[(i+1) % 12]
+        arc   = (end - start) % 360.0
+        delta = (L - start) % 360.0
+        if delta <= arc or math.isclose(delta, arc, rel_tol=1e-12, abs_tol=1e-8):
+            return i+1
+    return 12
 
-    planets_in_houses: Dict[str, int] = {}
-    # Try house_pos (API variations exist across builds)
+def assign_houses_sidereal(jd_ut: float, lat: float, lon: float, ayan: float, planets):
+    """
+    Compute tropical cusps with Placidus, convert them to SIDEREAL (−ayan),
+    then assign each planet to a house using its SIDEREAL longitude.
+    """
+    asc_trop, cusps_trop = _houses_placidus(jd_ut, lat, lon)
+    cusps_sid = [norm360(c - ayan) for c in cusps_trop]
+
+    houses = {}
     for name, v in planets.items():
-        hnum: Optional[int] = None
-        try:
-            # Newer pyswisseph variants expose house_pos(armc, geolat, eps, hsys, (lon, lat, dist))
-            # We don't have ARMC/eps directly; ascmc array usually contains Asc/MC/ARMC.
-            # If this call shape fails, fall back to interval method.
-            hnum = None  # keep for clarity
-        except Exception:
-            hnum = None
+        houses[name] = _house_index_from_sidereal(cusps_sid, v["sid_lon"])
 
-        if hnum is None:
-            hnum = house_of_interval(v["trop_lon"])
-        planets_in_houses[name] = hnum
+    asc_sid = norm360(asc_trop - ayan)
+    return asc_trop, asc_sid, cusps_trop, cusps_sid, houses
 
-    return asc_trop, cusps, planets_in_houses
-
-# --------------------------------------------------
-#   Jaimini Chara Karakas (8-karaka scheme, JHora-like)
-# --------------------------------------------------
-def compute_chara_karakas_8(sid_lon_by_planet: Dict[str, float],
-                            retro_by_planet: Dict[str, bool]) -> Dict[str, Dict]:
+def compute_chara_karakas_8(sid_lon_by_planet: Dict[str,float],
+                            retro_by_planet: Dict[str,bool]) -> Dict[str, Dict]:
     """
-    8-Karaka scheme (Rahu participates; DK ni nujno Rahu).
-    Retro correction: degree_in_sign := 30° - (lon%30) for retro bodies.
-    For Rahu: use 30° - (lon%30).
-    Sorting: desc by (degree_in_sign, sidereal_longitude).
-    Roles: AK, AmK, BK, MK, PiK, PK, GK, DK
+    8-karaka scheme (JHora-like):
+      - candidates: Sun..Saturn + Rahu (8 bodies)
+      - degree-in-sign = (lon % 30); for retrograde planets use 30 - (lon % 30)
+      - Rahu degree-in-sign = 30 - (lon % 30)  (tail logic)
+      - sort DESC by (deg_in_sign, sid_lon)
+      - roles = [AK, AmK, BK, MK, PiK, PK, GK, DK]
     """
-    roles = [
-        "Atmakaraka", "Amatyakaraka", "Bhratrukaraka",
-        "Matrukaraka", "Pitrukaraka", "Putrakaraka",
-        "Gnyatikaraka", "Darakaraka"
-    ]
+    def deg_in_sign(name, lon):
+        d = lon % 30.0
+        if name == "Rahu":               # Rahu special
+            d = 30.0 - d
+        elif retro_by_planet.get(name, False):
+            d = 30.0 - d
+        if abs(d - 30.0) < 1e-10:
+            d = 0.0
+        return d
 
-    seq = []
+    candidates = []
     for name in ["Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn","Rahu"]:
         lon = sid_lon_by_planet[name]
-        d = lon % 30.0
-        if retro_by_planet.get(name, False) or name == "Rahu":
-            d = 30.0 - d
-            if abs(d - 30.0) < 1e-10:
-                d = 0.0
-        seq.append({"planet": name, "deg_in_sign": d, "sid_lon": lon})
+        d   = deg_in_sign(name, lon)
+        candidates.append({"planet":name, "deg":d, "lon":lon})
 
-    seq.sort(key=lambda r: (r["deg_in_sign"], r["sid_lon"]), reverse=True)
+    candidates.sort(key=lambda r: (r["deg"], r["lon"]), reverse=True)
 
-    out: Dict[str, Dict] = {}
-    for role, r in zip(roles, seq):
+    roles = ["Atmakaraka","Amatyakaraka","Bhratrukaraka",
+             "Matrukaraka","Pitrukaraka","Putrakaraka",
+             "Gnyatikaraka","Darakaraka"]
+
+    out = {}
+    for role, item in zip(roles, candidates):
         out[role] = {
-            "planet": r["planet"],
-            "degree_in_sign": round(r["deg_in_sign"], 6),
-            "sidereal_longitude": round(r["sid_lon"], 6),
-            "sign": sign_of(r["sid_lon"]),
+            "planet": item["planet"],
+            "degree_in_sign": round(item["deg"], 6),
+            "sidereal_longitude": round(item["lon"], 6),
+            "sign": sign_of(item["lon"])
         }
-    out["_meta"] = {"scheme": "8-karaka (Rahu included, retro-corrected)"}
+    out["_meta"] = {"scheme": "8-karaka (Rahu in ranking, retro-corrected)"}
     return out
 
-# ---------------------------
-#      FastAPI App
-# ---------------------------
+# --------- FastAPI ----------
 app = FastAPI(title="My PyJHora API", version="0.5.0")
 
 class BirthData(BaseModel):
@@ -227,7 +192,9 @@ def health():
         "status": "ok",
         "ephe_path": EPHE_PATH,
         "ephe_loaded": ok,
-        "settings": {"house_system":"Sripati/Placidus","ayanamsa":"Lahiri","node":"Mean"}
+        "house_system": "Sripati/Placidus",
+        "ayanamsa": "Lahiri",
+        "node": "Mean",
     }
 
 @app.post("/chart")
@@ -237,28 +204,26 @@ def chart(data: BirthData):
 
         # planets
         planets, ayan = planet_data(jd)
-        sid_only  = {k: v["sid_lon"]  for k, v in planets.items()}
-        retro_map = {k: v["retro"]    for k, v in planets.items()}
+        sid_only  = {k: v["sid_lon"] for k,v in planets.items()}
+        retro_map = {k: v["retro"]   for k,v in planets.items()}
 
-        # houses
-        asc_trop, cusps_trop, planets_in_houses = placidus_houses_and_positions(
-            jd, data.lat, data.lon, planets
+        # houses (SIDEREAL assignment)
+        asc_trop, asc_sid, cusps_trop, cusps_sid, houses = assign_houses_sidereal(
+            jd, data.lat, data.lon, ayan, planets
         )
 
-        # karakas (8-karaka)
+        # chara karakas (8-karaka with Rahu ranked; DK not fixed)
         karakas = compute_chara_karakas_8(sid_only, retro_map)
 
-        # pack planets (trop/sid + house + retro)
+        # planets out
         planets_out = {}
         for name, v in planets.items():
             planets_out[name] = {
                 "tropical": {"longitude": round(v["trop_lon"], 6), "sign": sign_of(v["trop_lon"])},
                 "sidereal": {"longitude": round(v["sid_lon"], 6),  "sign": sign_of(v["sid_lon"])},
-                "house": planets_in_houses[name],
-                "retrograde": bool(v["retro"]),
+                "house": int(houses[name]),
+                "retrograde": bool(v["retro"])
             }
-
-        cusps_sid = [round(norm360(c - ayan), 6) for c in cusps_trop]
 
         return {
             "name": data.name,
@@ -266,12 +231,12 @@ def chart(data: BirthData):
             "ayanamsa": round(ayan, 6),
             "settings": {"ayanamsa": "Lahiri", "node": "Mean", "house_system": "Sripati/Placidus"},
             "ascendant": {
-                "degree_sidereal": round(norm360(asc_trop - ayan), 6),
-                "sign_sidereal": sign_of(norm360(asc_trop - ayan)),
+                "degree_sidereal": round(asc_sid, 6),
+                "sign_sidereal": sign_of(asc_sid)
             },
             "house_cusps": {
                 "tropical": [round(c, 6) for c in cusps_trop],
-                "sidereal": cusps_sid
+                "sidereal": [round(c, 6) for c in cusps_sid]
             },
             "planets": planets_out,
             "chara_karakas": karakas
@@ -279,9 +244,7 @@ def chart(data: BirthData):
     except Exception as e:
         raise HTTPException(400, f"Calculation error: {e}")
 
-# ---------------------------
-#  /chart_place  (robust)
-# ---------------------------
+# ----- /chart_place: geocode + local DST -----
 _tf = TimezoneFinder()
 
 class PlaceData(BaseModel):
@@ -298,28 +261,16 @@ def geocode_place(place: str) -> Tuple[float, float]:
     return float(d["lat"]), float(d["lon"])
 
 @app.post("/chart_place")
-def chart_place(
-    data: Optional[PlaceData] = None,
-    place: Optional[str] = Body(None),
-    datetime_local: Optional[str] = Body(None),
-):
-    """
-    Sprejme JSON body ali ploske Body parametre (za Actions toleranco).
-    """
+def chart_place(data: PlaceData):
     try:
-        if data is None:
-            if not place or not datetime_local:
-                raise HTTPException(400, "Provide JSON body or both 'place' and 'datetime_local'.")
-            data = PlaceData(place=place, datetime_local=datetime_local)
-
         lat, lon = geocode_place(data.place)
         tz_name = _tf.timezone_at(lat=lat, lng=lon)
         if tz_name is None:
             raise HTTPException(400, f"Cannot find timezone for {data.place}")
 
-        dt_local_naive = datetime.strptime(data.datetime_local, "%Y-%m-%d %H:%M")
-        tzinfo = zoneinfo.ZoneInfo(tz_name)
-        dt_local = dt_local_naive.replace(tzinfo=tzinfo)
+        dt_local = datetime.strptime(data.datetime_local, "%Y-%m-%d %H:%M").replace(
+            tzinfo=zoneinfo.ZoneInfo(tz_name)
+        )
         offset_hours = dt_local.utcoffset().total_seconds() / 3600.0
 
         birth = BirthData(
@@ -332,9 +283,7 @@ def chart_place(
     except Exception as e:
         raise HTTPException(400, f"chart_place error: {e}")
 
-# ---------------------------
-#   Light variants (for GPT)
-# ---------------------------
+# --- light endpoints ---
 @app.post("/chart_light")
 def chart_light(data: BirthData):
     full = chart(data)
@@ -347,16 +296,7 @@ class PlaceDataLight(PlaceData):
     pass
 
 @app.post("/chart_place_light")
-def chart_place_light(
-    data: Optional[PlaceDataLight] = None,
-    place: Optional[str] = Body(None),
-    datetime_local: Optional[str] = Body(None),
-):
-    if data is None:
-        if not place or not datetime_local:
-            raise HTTPException(400, "Provide JSON body or both 'place' and 'datetime_local'.")
-        data = PlaceDataLight(place=place, datetime_local=datetime_local)
-
+def chart_place_light(data: PlaceDataLight):
     lat, lon = geocode_place(data.place)
     tz_name = _tf.timezone_at(lat=lat, lng=lon)
     if tz_name is None:
@@ -370,5 +310,4 @@ def chart_place_light(
         hour=dt_local.hour, minute=dt_local.minute,
         lat=lat, lon=lon, tz=dt_local.utcoffset().total_seconds()/3600.0
     )
-    full = chart(birth)
-    return {"ascendant": full["ascendant"], "chara_karakas": full["chara_karakas"]}
+    return chart_light(birth)
