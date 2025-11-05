@@ -75,11 +75,16 @@ def get_ayanamsha_deg(jd_ut: float) -> float:
     return swe.get_ayanamsa(jd_ut)
 
 def ascendant_sid(jd_ut: float, lat: float, lon: float) -> float:
-    # Asc tropično → odštej ayanamšo
-    houses, ascmc, _, _ = swe.houses_ex(jd_ut, lat, lon, b'P', FLG_TROP)
-    asc_trop = ascmc[0]
-    ayan = get_ayanamsha_deg(jd_ut)
-    return norm(asc_trop - ayan)
+    """
+    Vrne siderealni ascendent (stopinje 0–360).
+    Opomba: swe.set_sid_mode(Lahiri) je nastavljen globalno,
+    zato je rezultat že siderealen.
+    """
+    # houses_ex -> (cusps[1..12], ascmc[0..9]); ascmc[0] = ASC
+    cusps, ascmc = swe.houses_ex(jd_ut, lat, lon, b'P')  # Placidus; za Whole-Sign to ni važno
+    asc = ascmc[0]
+    return norm(asc)
+
 
 def planets_sid(jd_ut: float) -> Dict[str, float]:
     ids = {
