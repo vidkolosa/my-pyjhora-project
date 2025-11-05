@@ -57,13 +57,35 @@ def sign_of(lon: float) -> str:
     return SIGNS[int(lon // 30) % 12]
 
 def tz_offset_hours(lat: float, lon: float, dt: datetime, tz_override: Optional[float]) -> float:
+    """
+    Vrne zamik v urah od UTC. Če je podan tz_override, ga uporabi.
+    JHora-kompatibilni popravek: za Evropo pred 1970 upoštevamo fiksne standardne offsete (brez DST).
+    """
     if tz_override is not None:
         return float(tz_override)
+
     tf = TimezoneFinder()
     tzname = tf.timezone_at(lat=lat, lng=lon) or "UTC"
+
+    # --- JHora-compatibility patch for historical Europe ---
+    # JHora za 1960-ta leta v Jugoslaviji računa standardni čas (brez poletnega).
+    if tzname.startswith("Europe/") and dt.year < 1970:
+        # Groba delitev po geografski dolžini na WET(0), CET(+1), EET(+2)
+        # WET:   lon < 7.5°E  → 0
+        # CET:   7.5°E–22.5°E → +1  (Slovenija ~16°E → +1)
+        # EET:   ≥22.5°E      → +2
+        if lon < 7.5:
+            return 0.0
+        elif lon < 22.5:
+            return 1.0
+        else:
+            return 2.0
+
+    # Sicer uporabi IANA/pytz (moderna pravila z DST)
     tzinfo = pytz.timezone(tzname)
     local = tzinfo.localize(dt)
     return local.utcoffset().total_seconds() / 3600.0
+
 
 def julday_ut_from_local(bd: BirthData) -> float:
     dt_local = datetime(bd.year, bd.month, bd.day, bd.hour, bd.minute)
